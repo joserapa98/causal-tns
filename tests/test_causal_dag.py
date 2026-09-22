@@ -11,12 +11,12 @@ from models import CausalChain, CausalDAG
 
 def _diamond_dag() -> CausalDAG:
     adjacency = [
-        [0, 1, 1, 0],
-        [0, 0, 0, 1],
-        [0, 0, 0, 1],
+        [0, 2, 2, 0],
+        [0, 0, 0, 2],
+        [0, 0, 0, 2],
         [0, 0, 0, 0],
     ]
-    return CausalDAG(adjacency, phys_dim=2, bond_dim=2, dtype=torch.float64)
+    return CausalDAG(adjacency, phys_dim=2, dtype=torch.float64)
 
 
 def test_dag_probabilities_and_partial_marginals() -> None:
@@ -64,22 +64,22 @@ def test_dag_einsum_differentiates_and_samples() -> None:
     assert torch.all((samples >= 0) & (samples < 2))
 
 
-def test_dag_bond_dimension_matrix() -> None:
-    adjacency = [[0, 1, 1], [0, 0, 0], [0, 0, 0]]
-    bond_dims = [[0, 2, 3], [0, 0, 0], [0, 0, 0]]
-    dag = CausalDAG(adjacency, phys_dim=[2, 3, 2], bond_dim=bond_dims)
+def test_dag_weighted_adjacency() -> None:
+    adjacency = [[0, 2, 3], [0, 0, 0], [0, 0, 0]]
+    dag = CausalDAG(adjacency, phys_dim=[2, 3, 2])
 
+    assert torch.equal(dag.adjacency, torch.tensor(adjacency))
     assert dag.logical_edges[0].size() == 2
     assert dag.logical_edges[1].size() == 3
     assert dag.topological_order == (0, 1, 2)
 
 
 def test_dag_einsum_matches_chain_contraction() -> None:
-    adjacency = [[0, 1, 0], [0, 0, 0], [0, 1, 0]]
+    adjacency = [[0, 2, 0], [0, 0, 0], [0, 2, 0]]
     torch.manual_seed(2)
     chain = CausalChain(3, 2, 2, directions="rl", dtype=torch.float64)
     torch.manual_seed(2)
-    dag = CausalDAG(adjacency, 2, 2, dtype=torch.float64)
+    dag = CausalDAG(adjacency, 2, dtype=torch.float64)
     states = torch.tensor(list(itertools.product(range(2), repeat=3)))
     input = nnf.one_hot(states, num_classes=2).to(torch.float64)
 
@@ -95,7 +95,7 @@ def test_dag_einsum_matches_chain_contraction() -> None:
 
 
 def test_dag_multiple_batch_axes() -> None:
-    dag = CausalDAG([[0, 1], [0, 0]], 2, 2, n_batches=2)
+    dag = CausalDAG([[0, 2], [0, 0]], 2, n_batches=2)
     values = torch.randint(2, (3, 4, 2))
     input = nnf.one_hot(values, num_classes=2).to(torch.get_default_dtype())
 
@@ -105,12 +105,17 @@ def test_dag_multiple_batch_axes() -> None:
 @pytest.mark.parametrize(
     ("adjacency", "message"),
     [
-        ([[0, 1], [1, 0]], "acyclic"),
+        ([[0, 2], [3, 0]], "acyclic"),
         ([[1, 0], [0, 0]], "self-edges"),
-        ([[0, 2], [0, 0]], "zeros and ones"),
+        ([[0, -2], [0, 0]], "negative"),
         ([[0, 1, 0], [0, 0, 0]], "square"),
     ],
 )
 def test_invalid_adjacency(adjacency: list[list[int]], message: str) -> None:
     with pytest.raises(ValueError, match=message):
-        CausalDAG(adjacency, phys_dim=2, bond_dim=2)
+        CausalDAG(adjacency, phys_dim=2)
+
+
+def test_adjacency_requires_integer_bond_dimensions() -> None:
+    with pytest.raises(TypeError, match="integer bond dimensions"):
+        CausalDAG([[0, 2.0], [0, 0]], phys_dim=2)

@@ -92,9 +92,8 @@ variables. `chain.evaluate(...)` divides each requested weight by this value.
 
 ## General DAG
 
-`adjacency[i][j] = 1` represents the arrow `i -> j`. `bond_dim` may be one
-shared integer or a square matrix specifying the dimension of each active
-edge.
+`adjacency[i][j]` is the bond dimension of the arrow `i -> j`; zero means
+there is no arrow. All nonzero entries must be positive integers.
 
 ```python
 import torch
@@ -103,13 +102,13 @@ import torch.nn.functional as nnf
 from models import CausalDAG
 
 adjacency = [
-    [0, 1, 1, 0],
-    [0, 0, 0, 1],
-    [0, 0, 0, 1],
+    [0, 4, 4, 0],
+    [0, 0, 0, 4],
+    [0, 0, 0, 4],
     [0, 0, 0, 0],
 ]
 
-dag = CausalDAG(adjacency, phys_dim=2, bond_dim=4)
+dag = CausalDAG(adjacency, phys_dim=2)
 values = torch.tensor([[0, 1, 0, 1]])
 input = nnf.one_hot(values, num_classes=2).to(torch.get_default_dtype())
 probabilities = dag.evaluate(input)
@@ -119,7 +118,7 @@ marginals = dag.evaluate(
 )
 ```
 
-The adjacency matrix must be square, binary, free of self-edges, and acyclic.
+The adjacency matrix must be square, non-negative, free of self-edges, and acyclic.
 `CausalDAG` validates these conditions during construction. Evaluation,
 partial marginalization, normalization, and sequential sampling use the same
 interface as `CausalChain`.

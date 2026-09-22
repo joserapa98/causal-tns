@@ -19,13 +19,10 @@ class CausalDAG(CausalTN):
     Parameters
     ----------
     adjacency : torch.Tensor or sequence[sequence[int]]
-        Square binary matrix. A nonzero entry ``adjacency[i][j]`` represents
-        the directed edge ``i -> j``.
+        Square matrix of non-negative integers. ``adjacency[i][j]`` is the
+        bond dimension of the directed edge ``i -> j``; zero means no edge.
     phys_dim : int or sequence[int]
         Physical dimension of every variable.
-    bond_dim : int or sequence[sequence[int]]
-        Shared bond dimension or a square matrix with one positive dimension
-        for every active adjacency entry.
     n_batches : int
         Number of batch axes in evaluation inputs.
     init_method : str
@@ -44,7 +41,6 @@ class CausalDAG(CausalTN):
         self,
         adjacency: torch.Tensor | Sequence[Sequence[int]],
         phys_dim: int | Sequence[int],
-        bond_dim: int | Sequence[Sequence[int]],
         n_batches: int = 1,
         init_method: str = "randn",
         device: torch.device | None = None,
@@ -61,9 +57,9 @@ class CausalDAG(CausalTN):
         ):
             raise ValueError("`n_batches` must be a non-negative integer")
 
-        topological_order = self._topological_order(adjacency_tensor)
+        topological_order = self._topological_order(adjacency_tensor != 0)
         phys_dims = self._expand_dims(phys_dim, n_features, "phys_dim")
-        bond_dims = self._check_bond_dims(bond_dim, adjacency_tensor)
+        bond_dims = tuple(tuple(row) for row in adjacency_tensor.tolist())
 
         super().__init__(name=name)
         self.adjacency = adjacency_tensor
@@ -120,16 +116,22 @@ class CausalDAG(CausalTN):
         try:
             tensor = torch.as_tensor(adjacency)
         except (TypeError, ValueError, RuntimeError) as err:
-            raise TypeError("`adjacency` must be a square binary matrix") from err
+            raise TypeError("`adjacency` must be a square integer matrix") from err
         if tensor.ndim != 2 or tensor.shape[0] != tensor.shape[1]:
             raise ValueError("`adjacency` must be a square matrix")
         if tensor.shape[0] < 1:
             raise ValueError("`adjacency` must contain at least one variable")
-        if torch.any((tensor != 0) & (tensor != 1)):
-            raise ValueError("`adjacency` must contain only zeros and ones")
+        if (
+            tensor.dtype == torch.bool
+            or torch.is_floating_point(tensor)
+            or tensor.is_complex()
+        ):
+            raise TypeError("`adjacency` must contain integer bond dimensions")
         if torch.any(torch.diag(tensor) != 0):
             raise ValueError("`adjacency` cannot contain self-edges")
-        return tensor.to(dtype=torch.bool, device="cpu")
+        if torch.any(tensor < 0):
+            raise ValueError("`adjacency` cannot contain negative bond dimensions")
+        return tensor.to(dtype=torch.int64, device="cpu").clone()
 
     @staticmethod
     def _topological_order(adjacency: torch.Tensor) -> tuple[int, ...]:
@@ -148,38 +150,6 @@ class CausalDAG(CausalTN):
         if len(order) != n_features:
             raise ValueError("`adjacency` must define a directed acyclic graph")
         return tuple(order)
-
-    @staticmethod
-    def _check_bond_dims(
-        bond_dim: int | Sequence[Sequence[int]],
-        adjacency: torch.Tensor,
-    ) -> tuple[tuple[int, ...], ...]:
-        n_features = adjacency.shape[0]
-        if isinstance(bond_dim, int) and not isinstance(bond_dim, bool):
-            if bond_dim < 1:
-                raise ValueError("`bond_dim` must be positive")
-            return tuple((bond_dim,) * n_features for _ in range(n_features))
-        try:
-            matrix = torch.as_tensor(bond_dim)
-        except (TypeError, ValueError, RuntimeError) as err:
-            raise TypeError("`bond_dim` must be an integer or a square matrix") from err
-        if matrix.shape != adjacency.shape:
-            raise ValueError("A bond-dimension matrix must match `adjacency`")
-
-        result: list[tuple[int, ...]] = []
-        for parent in range(n_features):
-            row: list[int] = []
-            for child in range(n_features):
-                value = matrix[parent, child].item()
-                if adjacency[parent, child] and (
-                    isinstance(value, bool)
-                    or not float(value).is_integer()
-                    or value < 1
-                ):
-                    raise ValueError("Active bond dimensions must be positive integers")
-                row.append(int(value) if adjacency[parent, child] else 0)
-            result.append(tuple(row))
-        return tuple(result)
 
     def contract(self, nodes: Sequence[tk.Node]) -> torch.Tensor:
         """Contract all selected causal factors in one einsum operation."""
