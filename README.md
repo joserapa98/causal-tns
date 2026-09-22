@@ -6,16 +6,15 @@ motivation is described in
 [`docs/causal_tn_notes.tex`](docs/causal_tn_notes.tex).
 
 The current implementation provides one-dimensional causal chains and general
-directed acyclic graphs. Every variable is represented by a structured
-`CausalNode` with two static views:
+directed acyclic graphs. Every variable has a trainable mechanism `K` and one
+outgoing channel `B` per child. Their entries are squared during contraction;
+`K` is normalized over its physical value and each `B` over its bond. These
+local constraints make the complete distribution normalized.
 
-- the `eval` view uses explicit copies of the physical input;
-- the `marg` view uses a fixed copy tensor and shares all trainable tensors with
-  the `eval` view.
-
-All trainable components are squared during contraction. The local mechanism
-`K` is normalized over its physical input, while the complete network uses a
-global normalization factor.
+A query plan retains the observed variables and their ancestors. It contains
+one parameter-sharing view per retained variable and only the bonds needed for
+that query. Compiling a plan creates its fixed TensorKrowch nodes; evaluating
+the plan reuses those nodes without changing their connections.
 
 ## Environment
 
@@ -56,6 +55,10 @@ probability = chain.evaluate(input)
 partial_input = [input[:, 0], input[:, 2]]
 marginal = chain.evaluate(partial_input, marg_features=[1])
 
+# Reuse a compiled query during training or repeated inference.
+plan = chain.compile_query(marg_features=[1])
+marginal = chain.evaluate(partial_input, plan=plan)
+
 # Draw complete assignments.
 samples = chain.sample(100)
 ```
@@ -75,18 +78,18 @@ directions = "rlr"
 directions = ["rlr"]
 ```
 
-`chain.normalize()` returns the unnormalized mass obtained by marginalizing all
-variables. `chain.evaluate(...)` divides each requested weight by this value.
+`chain.normalize()` returns one, the total mass guaranteed by local
+normalization. `chain.evaluate(...)` returns probabilities directly.
 
 ## Main classes
 
-- `CausalNode` owns the trainable `K`, incoming `A`, and outgoing `B`
-  components. It returns disconnected factors from `evaluate` and
-  `marginalize`.
-- `CausalTN` stores the ordered causal variables and defines the common query
-  interface.
+- `CausalNode` owns the trainable `K` and outgoing `B` components and creates
+  parameter-sharing query views.
+- `QueryPlan` stores active features, bonds, and views for one marginal query.
+- `CausalTN` stores the ordered causal variables, compiles query plans, and
+  defines the common evaluation and sampling interface.
 - `CausalChain` builds arbitrary one-dimensional arrow patterns, contracts the
-  selected views, normalizes probabilities, and samples from left to right.
+  selected views and samples from left to right.
 - `CausalDAG` constructs an arbitrary directed acyclic graph from its adjacency
   matrix and contracts the selected factors with one `einsum` operation.
 
@@ -123,7 +126,7 @@ The adjacency matrix must be square, non-negative, free of self-edges, and acycl
 partial marginalization, normalization, and sequential sampling use the same
 interface as `CausalChain`.
 
-The marginalization nodes are persistent virtual `ParamNode` copies created
+The query views use persistent virtual `ParamNode` copies created
 with `share_tensor=True`. TensorKrowch 1.1.6 reattaches copied leaf edges, so the
 implementation contains one localized compatibility helper that restores the
 required logical edge objects through TensorKrowch's private graph API. The
@@ -136,6 +139,5 @@ conda run -n causal-tns python -m pytest -q
 conda run -n causal-tns ruff check src tests experiments
 ```
 
-The marginalization copy tensor is dense. Its rank grows with the out-degree of
-a causal variable, so the current representation is intended first for chains
-and other low-degree networks.
+Marginal views use a dense copy tensor whose rank grows with the number of
+retained children. Plan compilation omits branches without observed descendants.
