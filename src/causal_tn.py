@@ -4,12 +4,25 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from collections.abc import Sequence
+from dataclasses import dataclass
 
 import tensorkrowch as tk
 import torch
 import torch.nn.functional as nnf
 
-from causal_node import CausalNode
+from causal_node import CausalNode, CausalView
+
+
+@dataclass(frozen=True)
+class QueryPlan:
+    """Reusable selection of local views and bonds for one observation mask."""
+
+    network: CausalTN
+    marg_features: tuple[int, ...]
+    observed_features: tuple[int, ...]
+    active_features: tuple[int, ...]
+    active_edges: tuple[tk.Edge, ...]
+    views: tuple[CausalView, ...]
 
 
 class CausalTN(tk.TensorNetwork):
@@ -18,6 +31,9 @@ class CausalTN(tk.TensorNetwork):
     def __init__(self, name: str | None = None) -> None:
         super().__init__(name=name)
         self.causal_nodes: OrderedDict[str, CausalNode] = OrderedDict()
+        self.query_plans: dict[tuple[int, ...], QueryPlan] = {}
+        self.links: list[tuple[int, int]] = []
+        self.logical_edge_map: dict[tuple[int, int], tk.Edge] = {}
 
     @property
     def n_features(self) -> int:
@@ -50,17 +66,59 @@ class CausalTN(tk.TensorNetwork):
         return dims
 
     def reset(self) -> None:
-        """Reset resultants while preserving the static marginalization view."""
+        """Reset resultants while preserving compiled query views."""
         super().reset()
         # TensorKrowch intentionally skips persistent virtual nodes. Clear their
         # operation caches so they cannot retain deleted resultant children.
         for node in self.virtual_nodes.values():
             node._successors = {}
 
-    def set_data_nodes(self) -> None:
-        """Create the data nodes required by every causal variable."""
-        for node in self.causal_nodes.values():
-            node.set_data_nodes()
+    def compile_query(self, marg_features: Sequence[int] | None = None) -> QueryPlan:
+        """Compile and cache the views needed for one marginal query.
+
+        Only observed features and their ancestors remain active. Views share
+        the base parameters and logical edge objects, so later evaluations do
+        not change the graph.
+        """
+        marg = self._check_marg_features(marg_features)
+        if marg in self.query_plans:
+            return self.query_plans[marg]
+        observed = tuple(i for i in range(self.n_features) if i not in marg)
+        active = set(observed)
+        parents: dict[int, list[int]] = {i: [] for i in range(self.n_features)}
+        for parent, child in self.links:
+            parents[child].append(parent)
+        stack = list(observed)
+        while stack:
+            child = stack.pop()
+            for parent in parents[child]:
+                if parent not in active:
+                    active.add(parent)
+                    stack.append(parent)
+
+        views: list[CausalView] = []
+        active_names = {self._identifier(i) for i in active}
+        for i in sorted(active):
+            node = self.causal_nodes[self._identifier(i)]
+            children = tuple(
+                name for name in node.out_bond_dims if name in active_names
+            )
+            views.append(node.make_view(i in observed, children))
+        active_edges = tuple(
+            self.logical_edge_map[parent, child]
+            for parent, child in self.links
+            if parent in active and child in active
+        )
+        plan = QueryPlan(
+            network=self,
+            marg_features=marg,
+            observed_features=observed,
+            active_features=tuple(sorted(active)),
+            active_edges=active_edges,
+            views=tuple(views),
+        )
+        self.query_plans[marg] = plan
+        return plan
 
     def _check_marg_features(
         self, marg_features: Sequence[int] | None
@@ -145,34 +203,38 @@ class CausalTN(tk.TensorNetwork):
             result[feature] = tensor
         return result
 
-    def _contract_unnormalized(
+    def _evaluate_plan(
         self,
         input: torch.Tensor | Sequence[torch.Tensor] | None,
-        marg_features: tuple[int, ...],
+        plan: QueryPlan,
     ) -> torch.Tensor:
+        inputs = self._prepare_inputs(input, plan.marg_features)
         self.reset()
-        inputs = self._prepare_inputs(input, marg_features)
         active_nodes: list[tk.Node] = []
-        for i, node in enumerate(self.causal_nodes.values()):
-            factors = (
-                node.marginalize() if i in marg_features else node.evaluate(inputs[i])
-            )
-            active_nodes.extend(factors)
-        return self.contract(active_nodes)
+        for i, view in zip(plan.active_features, plan.views):
+            active_nodes.extend(view.contract(inputs.get(i)))
+        return self.contract(active_nodes, plan.active_edges)
 
     def evaluate(
         self,
         input: torch.Tensor | Sequence[torch.Tensor] | None = None,
         marg_features: Sequence[int] | None = None,
+        plan: QueryPlan | None = None,
     ) -> torch.Tensor:
-        """Evaluate a normalized probability or partial marginal."""
-        marg_features = self._check_marg_features(marg_features)
-        numerator = self._contract_unnormalized(input, marg_features)
-        return numerator / self.normalize()
+        """Evaluate a probability or partial marginal using a cached plan."""
+        if plan is not None:
+            if marg_features is not None:
+                raise ValueError("Pass either `plan` or `marg_features`")
+            if not isinstance(plan, QueryPlan) or plan.network is not self:
+                raise ValueError("`plan` must belong to this network")
+        else:
+            plan = self.compile_query(marg_features)
+        return self._evaluate_plan(input, plan)
 
     def normalize(self) -> torch.Tensor:
-        """Return the global normalization factor."""
-        return self._contract_unnormalized(None, tuple(range(self.n_features)))
+        """Return the total mass, fixed to one by local normalization."""
+        parameter = next(self.parameters())
+        return torch.ones((), device=parameter.device, dtype=parameter.dtype)
 
     @torch.no_grad()
     def sample(
@@ -201,9 +263,9 @@ class CausalTN(tk.TensorNetwork):
                 inputs = [
                     torch.eye(dim, device=parameter.device, dtype=parameter.dtype)
                 ]
-                weights = self._contract_unnormalized(
+                weights = self.evaluate(
                     inputs,
-                    tuple(range(1, self.n_features)),
+                    plan=self.compile_query(tuple(range(1, self.n_features))),
                 ).reshape(1, dim)
                 probs = self._normalize_rows(weights)
                 samples[:, feature] = torch.multinomial(
@@ -226,9 +288,9 @@ class CausalTN(tk.TensorNetwork):
                     n_samples, 1
                 )
             )
-            weights = self._contract_unnormalized(
+            weights = self.evaluate(
                 repeated_inputs,
-                tuple(range(feature + 1, self.n_features)),
+                plan=self.compile_query(tuple(range(feature + 1, self.n_features))),
             ).reshape(n_samples, dim)
             probs = self._normalize_rows(weights)
             samples[:, feature] = torch.multinomial(
@@ -247,7 +309,9 @@ class CausalTN(tk.TensorNetwork):
             raise RuntimeError("Cannot sample from zero conditional weights")
         return weights / totals
 
-    def contract(self, nodes: Sequence[tk.Node]) -> torch.Tensor:
+    def contract(
+        self, nodes: Sequence[tk.Node], edges: Sequence[tk.Edge] | None = None
+    ) -> torch.Tensor:
         """Contract model-specific causal factors into a tensor."""
         raise NotImplementedError
 
@@ -255,6 +319,7 @@ class CausalTN(tk.TensorNetwork):
         self,
         input: torch.Tensor | Sequence[torch.Tensor] | None = None,
         marg_features: Sequence[int] | None = None,
+        plan: QueryPlan | None = None,
     ) -> torch.Tensor:
         """Call :meth:`evaluate`."""
-        return self.evaluate(input=input, marg_features=marg_features)
+        return self.evaluate(input=input, marg_features=marg_features, plan=plan)

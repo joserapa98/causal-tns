@@ -100,14 +100,12 @@ class CausalDAG(CausalTN):
             parent_node = self.causal_nodes[self._identifier(parent)]
             child_node = self.causal_nodes[self._identifier(child)]
             edge = (
-                parent_node.eval_out_nodes[self._identifier(child)]["bond"]
-                ^ child_node.eval_in_nodes[self._identifier(parent)]["bond"]
+                parent_node.out_nodes[self._identifier(child)]["bond"]
+                ^ child_node.k_node[f"in_{self._identifier(parent)}"]
             )
             self.logical_edges.append(edge)
-
-        for node in self.causal_nodes.values():
-            node.make_marginal_view()
-        self.set_data_nodes()
+            self.logical_edge_map[parent, child] = edge
+        self.links = links
 
     @staticmethod
     def _check_adjacency(
@@ -151,16 +149,18 @@ class CausalDAG(CausalTN):
             raise ValueError("`adjacency` must define a directed acyclic graph")
         return tuple(order)
 
-    def contract(self, nodes: Sequence[tk.Node]) -> torch.Tensor:
+    def contract(
+        self, nodes: Sequence[tk.Node], edges: Sequence[tk.Edge] | None = None
+    ) -> torch.Tensor:
         """Contract all selected causal factors in one einsum operation."""
         nodes = list(nodes)
+        if edges is None:
+            edges = self.logical_edges
         if not nodes:
             parameter = next(self.parameters())
             return torch.ones((), device=parameter.device, dtype=parameter.dtype)
 
-        edge_symbols = {
-            id(edge): get_symbol(i) for i, edge in enumerate(self.logical_edges)
-        }
+        edge_symbols = {id(edge): get_symbol(i) for i, edge in enumerate(edges)}
         edge_counts = dict.fromkeys(edge_symbols, 0)
         batch_symbols: dict[str, str] = {}
         next_symbol = len(edge_symbols)

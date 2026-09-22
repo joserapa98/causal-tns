@@ -110,14 +110,12 @@ class CausalChain(CausalTN):
             parent_node = self.causal_nodes[self._identifier(parent)]
             child_node = self.causal_nodes[self._identifier(child)]
             edge = (
-                parent_node.eval_out_nodes[self._identifier(child)]["bond"]
-                ^ child_node.eval_in_nodes[self._identifier(parent)]["bond"]
+                parent_node.out_nodes[self._identifier(child)]["bond"]
+                ^ child_node.k_node[f"in_{self._identifier(parent)}"]
             )
             self.logical_edges.append(edge)
-
-        for node in self.causal_nodes.values():
-            node.make_marginal_view()
-        self.set_data_nodes()
+            self.logical_edge_map[parent, child] = edge
+        self.links = links
 
     @staticmethod
     def _parse_directions(
@@ -146,24 +144,30 @@ class CausalChain(CausalTN):
             raise ValueError("Directions must be 'r', 'l', '->', or '<-'")
         return tuple(aliases[value] for value in values)
 
-    def contract(self, nodes: Sequence[tk.Node]) -> torch.Tensor:
+    def contract(
+        self, nodes: Sequence[tk.Node], edges: Sequence[tk.Edge] | None = None
+    ) -> torch.Tensor:
         """Contract causal factors along the stored chain bonds.
 
         Parameters
         ----------
         nodes : sequence[tensorkrowch.Node]
-            Factors returned by the selected view of every causal node.
+            Factors returned by the active query views.
+        edges : sequence[tensorkrowch.Edge], optional
+            Logical bonds retained by the query plan. Defaults to all bonds.
 
         Returns
         -------
         torch.Tensor
-            Unnormalized scalar or batched weights.
+            Scalar or batched probabilities.
         """
         active_nodes = list(nodes)
+        if edges is None:
+            edges = self.logical_edges
 
         # Contract only the stored logical bonds; inherited endpoints are stale
         # by design, while edge identity remains valid for all view combinations.
-        for edge in self.logical_edges:
+        for edge in edges:
             holders = [
                 node
                 for node in active_nodes
