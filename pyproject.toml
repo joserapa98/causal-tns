@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "causal-tns"
+version = "0.1.0"
+description = "Classical causal tensor networks built on TensorKrowch"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy",
+    "torch==2.14.0",
+    "tensorkrowch==1.1.6",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+py-modules = ["causal_node", "causal_tn"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["models"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
