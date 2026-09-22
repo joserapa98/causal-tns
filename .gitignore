@@ -206,6 +206,9 @@ tempCodeRunnerFile.py
 # Ruff stuff:
 .ruff_cache/
 
+# Local Codex plans
+.codex/
+
 # PyPI configuration file
 .pypirc
 
