@@ -1,0 +1,12 @@
+name: causal-tns
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pip
+  - pip:
+      - torch==2.14.0
+      - tensorkrowch==1.1.6
+      - numpy
+      - matplotlib
+      - scipy
